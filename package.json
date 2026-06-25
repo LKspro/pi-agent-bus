@@ -1,0 +1,38 @@
+{
+  "name": "pi-agent-bus",
+  "version": "1.0.0",
+  "description": "File-based inter-agent communication bus for pi coding agent. Multiple pi sessions communicate via filesystem mailboxes — the filesystem IS the network.",
+  "type": "module",
+  "main": "src/index.ts",
+  "files": [
+    "src",
+    "agents",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "agent-bus",
+    "inter-agent",
+    "messaging",
+    "multi-agent",
+    "orchestration",
+    "agent-team"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LKspro/pi-agent-bus"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.74.0"
+  },
+  "dependencies": {
+    "typebox": "^1.1.33"
+  }
+}
