@@ -73,6 +73,7 @@ Use `/agents` to list all available agents with copy-paste launch commands.
 | `/agents` | List all agents with launch commands |
 | `/agent-bus init` | Scaffold project agent structure |
 | `/agent-bus manual` | Toggle manual mode (block delegation) |
+| `/agent-bus launch` | Generate Windows Terminal multi-pane launch script |
 | `/peers` | Show active agents and pending messages |
 | `/delegate <agent> <task>` | Send a task to another agent |
 

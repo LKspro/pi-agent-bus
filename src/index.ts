@@ -655,7 +655,7 @@ export default function (pi: ExtensionAPI): void {
   // ── /agent-bus command — project init, manual toggle ──
   pi.registerCommand("agent-bus", {
     description:
-      "Manage agent-bus: init a project, toggle manual mode. Usage: /agent-bus [init|manual]",
+      "Manage agent-bus: init a project, toggle manual mode, generate launch script. Usage: /agent-bus [init|manual|launch]",
     handler: async (args, ctx) => {
       if (!args || args === "init") {
         // Create project structure
@@ -738,7 +738,47 @@ export default function (pi: ExtensionAPI): void {
         return;
       }
 
-      ctx.ui.notify("Usage: /agent-bus [init|manual]", "warning");
+      if (args === "launch") {
+        const agents = discoverAgents(cwd);
+        if (agents.length === 0) {
+          ctx.ui.notify(
+            "No agents found. Add .md files to ~/.pi/agent/agents/ or .pi/agents/",
+            "warning",
+          );
+          return;
+        }
+
+        // Build Windows Terminal launch command
+        const bash = "C:\\Program Files\\Git\\usr\\bin\\bash.exe";
+        const sessionDir = ".pi\\sessions";
+        let cmd = `wt.exe -M --title "pi agent team" ^`;
+
+        // First agent opens in a new tab
+        const first = agents[0]!;
+        cmd += `\n  new-tab --title "${first.name}" "${bash}" -c "pi --session ${sessionDir}\\${first.name}.jsonl --name ${first.name}"`;
+
+        // Remaining agents split horizontally
+        // Layout: split into columns of ~2 agents each
+        for (let i = 1; i < agents.length; i++) {
+          const a = agents[i]!;
+          cmd += ` ; ^\n  split-pane -H --title "${a.name}" "${bash}" -c "pi --session ${sessionDir}\\${a.name}.jsonl --name ${a.name}"`;
+        }
+
+        // Add move-focus to balance layout
+        cmd += ` ; ^\n  move-focus left`;
+        cmd += `\n`;
+        cmd += `\nREM Paste the above into a .bat file and run from project root.`;
+        cmd += `\nREM Or paste into \`Win+R\` → \`cmd\` and run directly.`;
+
+        ctx.ui.notify(cmd, "info");
+        ctx.ui.notify(
+          `${agents.length} agents. Copy the wt.exe command above into a .bat file or Win+R.\`,
+          "info",
+        );
+        return;
+      }
+
+      ctx.ui.notify("Usage: /agent-bus [init|manual|launch]", "warning");
     },
   });
 
