@@ -772,7 +772,7 @@ export default function (pi: ExtensionAPI): void {
 
         ctx.ui.notify(cmd, "info");
         ctx.ui.notify(
-          `${agents.length} agents. Copy the wt.exe command above into a .bat file or Win+R.\`,
+          `${agents.length} agents. Copy the wt.exe command above into a .bat file or Win+R.`,
           "info",
         );
         return;
@@ -827,12 +827,13 @@ export default function (pi: ExtensionAPI): void {
           try {
             const stat = fs.statSync(path.join(dir, latest));
             const age = Math.round((now - stat.mtimeMs) / 1000);
-            lastActivity =
-              age < 60
-                ? `${age}s ago`
-                : age < 3600
-                  ? `${Math.round(age / 60)}m ago`
-                  : `${Math.round(age / 3600)}h ago`;
+            if (age < 60) {
+              lastActivity = String(age) + "s ago";
+            } else if (age < 3600) {
+              lastActivity = String(Math.round(age / 60)) + "m ago";
+            } else {
+              lastActivity = String(Math.round(age / 3600)) + "h ago";
+            }
           } catch {
             // file may have been deleted between readdir and stat
           }
