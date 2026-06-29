@@ -196,12 +196,8 @@ function buildPromptFromMessage(msg: AgentMessage): string {
 
   switch (msg.type) {
     case "task": {
-      const preamble = currentAgent
-        ? `You are the "${currentAgentName}" agent.\n\n${currentAgent.systemPrompt}\n\n`
-        : "";
       return (
         `${header}\n\n` +
-        preamble +
         `**Task assigned to you:**\n\n${msg.body}\n\n` +
         `---\n` +
         `When you complete this task, use the \`send_to\` tool to send ` +
@@ -390,6 +386,25 @@ function gcProcessingFiles(): void {
 // ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI): void {
+  // ── Agent start: inject agent persona from discovered .md definition ──
+  pi.on("before_agent_start", async (event, ctx) => {
+    const sessionCwd = ctx.cwd || process.cwd();
+    const sessionName = pi.getSessionName()?.trim() || process.env.AGENT_BUS_NAME?.trim();
+    if (!sessionName) return;
+
+    const agent = findAgent(sessionCwd, sessionName);
+    const prompt = agent?.systemPrompt?.trim();
+    if (!prompt) return;
+
+    if (typeof event.systemPrompt === "string" && event.systemPrompt.startsWith(prompt)) {
+      return;
+    }
+
+    return {
+      systemPrompt: `${prompt}\n\n---\n\n${event.systemPrompt}`,
+    };
+  });
+
   // ── Session start: detect identity, watch mailbox ──
   pi.on("session_start", async (_event, ctx) => {
     cwd = ctx.cwd || process.cwd();
@@ -618,7 +633,7 @@ export default function (pi: ExtensionAPI): void {
   // ── /agents command ──
   pi.registerCommand("agents", {
     description:
-      "List all available agents with copy-paste launch commands for Windows Terminal",
+      "List all available agents with copy-paste launch commands",
     handler: async (_args, ctx) => {
       const agents = discoverAgents(cwd);
 
@@ -655,7 +670,7 @@ export default function (pi: ExtensionAPI): void {
   // ── /agent-bus command — project init, manual toggle ──
   pi.registerCommand("agent-bus", {
     description:
-      "Manage agent-bus: init a project, toggle manual mode, generate launch script. Usage: /agent-bus [init|manual|launch]",
+      "Manage agent-bus: init a project or toggle manual mode. Usage: /agent-bus [init|manual]",
     handler: async (args, ctx) => {
       if (!args || args === "init") {
         // Create project structure
@@ -738,47 +753,7 @@ export default function (pi: ExtensionAPI): void {
         return;
       }
 
-      if (args === "launch") {
-        const agents = discoverAgents(cwd);
-        if (agents.length === 0) {
-          ctx.ui.notify(
-            "No agents found. Add .md files to ~/.pi/agent/agents/ or .pi/agents/",
-            "warning",
-          );
-          return;
-        }
-
-        // Build Windows Terminal launch command
-        const bash = "C:\\Program Files\\Git\\usr\\bin\\bash.exe";
-        const sessionDir = ".pi\\sessions";
-        let cmd = `wt.exe -M --title "pi agent team" ^`;
-
-        // First agent opens in a new tab
-        const first = agents[0]!;
-        cmd += `\n  new-tab --title "${first.name}" "${bash}" -c "pi --session ${sessionDir}\\${first.name}.jsonl --name ${first.name}"`;
-
-        // Remaining agents split horizontally
-        // Layout: split into columns of ~2 agents each
-        for (let i = 1; i < agents.length; i++) {
-          const a = agents[i]!;
-          cmd += ` ; ^\n  split-pane -H --title "${a.name}" "${bash}" -c "pi --session ${sessionDir}\\${a.name}.jsonl --name ${a.name}"`;
-        }
-
-        // Add move-focus to balance layout
-        cmd += ` ; ^\n  move-focus left`;
-        cmd += `\n`;
-        cmd += `\nREM Paste the above into a .bat file and run from project root.`;
-        cmd += `\nREM Or paste into \`Win+R\` → \`cmd\` and run directly.`;
-
-        ctx.ui.notify(cmd, "info");
-        ctx.ui.notify(
-          `${agents.length} agents. Copy the wt.exe command above into a .bat file or Win+R.\`,
-          "info",
-        );
-        return;
-      }
-
-      ctx.ui.notify("Usage: /agent-bus [init|manual|launch]", "warning");
+      ctx.ui.notify("Usage: /agent-bus [init|manual]", "warning");
     },
   });
 
@@ -827,12 +802,13 @@ export default function (pi: ExtensionAPI): void {
           try {
             const stat = fs.statSync(path.join(dir, latest));
             const age = Math.round((now - stat.mtimeMs) / 1000);
-            lastActivity =
-              age < 60
-                ? `${age}s ago`
-                : age < 3600
-                  ? `${Math.round(age / 60)}m ago`
-                  : `${Math.round(age / 3600)}h ago`;
+            if (age < 60) {
+              lastActivity = String(age) + "s ago";
+            } else if (age < 3600) {
+              lastActivity = String(Math.round(age / 60)) + "m ago";
+            } else {
+              lastActivity = String(Math.round(age / 3600)) + "h ago";
+            }
           } catch {
             // file may have been deleted between readdir and stat
           }
