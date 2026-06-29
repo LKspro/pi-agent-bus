@@ -65,7 +65,7 @@ pi --session .pi/sessions/worker.jsonl --name worker
 pi --session .pi/sessions/reviewer.jsonl --name reviewer
 ```
 
-Use `/agents` to list all available agents with copy-paste launch commands.
+Use `/agents` to list all available agents with copy-paste launch commands. Those commands automatically re-enter the correct working directory with `cmd.exe /c "cd /d ... && ..."`, so project-local agents launch against the right repo even if you paste the command from another directory.
 
 Agent personas are loaded automatically from agent `.md` definitions at runtime, so starting `pi --name worker` will apply the matching discovered agent prompt from either `~/.pi/agent/agents/` or `.pi/agents/`.
 

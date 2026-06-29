@@ -405,6 +405,23 @@ function gcProcessingFiles(): void {
   }
 }
 
+function getLaunchCwd(agent: AgentConfig): string {
+  if (agent.source === "project") {
+    return path.dirname(path.dirname(path.dirname(agent.filePath)));
+  }
+  return cwd;
+}
+
+function escapeForCmdDoubleQuotes(value: string): string {
+  return value.replace(/"/g, '""');
+}
+
+function buildLaunchCommand(agent: AgentConfig): string {
+  const launchCwd = getLaunchCwd(agent);
+  const escapedCwd = escapeForCmdDoubleQuotes(launchCwd);
+  return `cmd.exe /c "cd /d ""${escapedCwd}"" && pi --session .pi/sessions/${agent.name}.jsonl --name ${agent.name}"`;
+}
+
 // ---------------------------------------------------------------------------
 // Extension factory (top-level export)
 // ---------------------------------------------------------------------------
@@ -682,7 +699,7 @@ export default function (pi: ExtensionAPI): void {
   // ── /agents command ──
   pi.registerCommand("agents", {
     description:
-      "List all available agents with copy-paste launch commands",
+      "List all available agents with copy-paste launch commands that jump to the correct project directory",
     handler: async (_args, ctx) => {
       const agents = discoverAgents(cwd);
 
@@ -705,7 +722,7 @@ export default function (pi: ExtensionAPI): void {
       for (const agent of agents) {
         const nameCol = agent.name.padEnd(17);
         const sourceCol = agent.source.padEnd(8);
-        const cmd = `pi --session .pi/sessions/${agent.name}.jsonl --name ${agent.name}`;
+        const cmd = buildLaunchCommand(agent);
         lines.push(`  ${nameCol}  ${sourceCol}  ${cmd}`);
       }
       lines.push("");
