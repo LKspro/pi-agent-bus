@@ -5,8 +5,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  AutoReturnedCorrelations,
+  TerminalResultCorrelations,
   taskCompletionInstructions,
+  shouldAcceptInboundMessage,
   shouldSuppressManualTaskResult,
 } from "../src/result-delivery.ts";
 
@@ -72,8 +73,16 @@ test("bundled agent personas do not instruct manual normal completion", async ()
   assert.match(extensionSource, /returns it automatically/);
 });
 
+test("repeated inbound terminal results are rejected before a second turn", () => {
+  const received = new TerminalResultCorrelations();
+
+  assert.equal(shouldAcceptInboundMessage("result", correlationId, received), true);
+  assert.equal(shouldAcceptInboundMessage("result", correlationId, received), false);
+  assert.equal(shouldAcceptInboundMessage("reply", correlationId, received), true);
+});
+
 test("automatic result delivery is idempotent per correlation", () => {
-  const returned = new AutoReturnedCorrelations();
+  const returned = new TerminalResultCorrelations();
 
   assert.equal(returned.record(correlationId), true);
   assert.equal(returned.record(correlationId), false);

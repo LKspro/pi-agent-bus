@@ -35,8 +35,8 @@ export function shouldSuppressManualTaskResult(
   );
 }
 
-/** Track terminal automatic deliveries so retries cannot return a task twice. */
-export class AutoReturnedCorrelations {
+/** Track terminal results so duplicate delivery cannot start another task turn. */
+export class TerminalResultCorrelations {
   private readonly correlations = new Set<string>();
 
   has(correlationId: string): boolean {
@@ -52,4 +52,13 @@ export class AutoReturnedCorrelations {
   clear(): void {
     this.correlations.clear();
   }
+}
+
+/** Return true when an inbound message is not a repeated terminal result. */
+export function shouldAcceptInboundMessage(
+  type: unknown,
+  correlationId: string,
+  receivedResults: TerminalResultCorrelations,
+): boolean {
+  return type !== "result" || receivedResults.record(correlationId);
 }

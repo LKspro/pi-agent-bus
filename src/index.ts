@@ -22,7 +22,8 @@ import {
   type AgentConfig,
 } from "./agents";
 import {
-  AutoReturnedCorrelations,
+  TerminalResultCorrelations,
+  shouldAcceptInboundMessage,
   shouldSuppressManualTaskResult,
   taskCompletionInstructions,
   type ActiveDelegatedTask,
@@ -37,7 +38,8 @@ let currentAgent: AgentConfig | null = null;
 let mailboxWatcher: fs.FSWatcher | null = null;
 let cwd: string = process.cwd();
 let activeDelegatedTask: ActiveDelegatedTask | null = null;
-const autoReturnedCorrelations = new AutoReturnedCorrelations();
+const autoReturnedCorrelations = new TerminalResultCorrelations();
+const receivedResultCorrelations = new TerminalResultCorrelations();
 
 // ---------------------------------------------------------------------------
 // Message types
@@ -166,6 +168,13 @@ function processIncomingMessage(filePath: string, pi: ExtensionAPI): void {
   // Verify this message is for us — if not, rename back for the correct agent
   if (msg.to !== currentAgentName) {
     renameBack(processingPath);
+    return;
+  }
+
+  // A result is terminal for a correlation. Suppress a duplicated inbound
+  // result before it queues a second agent turn.
+  if (!shouldAcceptInboundMessage(msg.type, msg.correlationId, receivedResultCorrelations)) {
+    tryCleanup(processingPath);
     return;
   }
 
@@ -425,6 +434,7 @@ export default function (pi: ExtensionAPI): void {
     cwd = ctx.cwd || process.cwd();
     activeDelegatedTask = null;
     autoReturnedCorrelations.clear();
+    receivedResultCorrelations.clear();
     detectIdentity(pi);
 
     // GC stale .processing locks from previous runs

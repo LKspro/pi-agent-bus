@@ -33,6 +33,7 @@
     "url": "https://github.com/LKspro/pi-agent-bus"
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": ">=0.74.0"
   },
   "dependencies": {
