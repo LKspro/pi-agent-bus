@@ -30,6 +30,8 @@ let currentAgentName: string | null = null; // null = orchestrator
 let currentAgent: AgentConfig | null = null;
 let mailboxWatcher: fs.FSWatcher | null = null;
 let cwd: string = process.cwd();
+let activeDelegatedTask: Pick<AgentMessage, "from" | "correlationId"> | null = null;
+const autoReturnedCorrelations = new Set<string>();
 
 // ---------------------------------------------------------------------------
 // Message types
@@ -161,6 +163,12 @@ function processIncomingMessage(filePath: string, pi: ExtensionAPI): void {
     return;
   }
 
+  // Record the task before queuing its prompt so normal manual completion can
+  // be suppressed. The agent_end handler returns the final answer automatically.
+  if (msg.type === "task") {
+    activeDelegatedTask = { from: msg.from, correlationId: msg.correlationId };
+  }
+
   // Build prompt and queue for next turn (never interrupt)
   const promptText = buildPromptFromMessage(msg);
   pi.sendUserMessage(promptText, { deliverAs: "followUp" });
@@ -200,9 +208,10 @@ function buildPromptFromMessage(msg: AgentMessage): string {
         `${header}\n\n` +
         `**Task assigned to you:**\n\n${msg.body}\n\n` +
         `---\n` +
-        `When you complete this task, use the \`send_to\` tool to send ` +
-        `your results back to "${msg.from}" with type "result" and ` +
-        `correlationId "${msg.correlationId}".`
+        `Your ordinary final response is returned automatically to "${msg.from}" ` +
+        `with correlationId "${msg.correlationId}". Do not use \`send_to\` ` +
+        `with type "result" for normal completion; that would duplicate the automatic ` +
+        `result. Use \`send_to\` only for linked questions or replies.`
       );
     }
 
@@ -472,6 +481,10 @@ export default function (pi: ExtensionAPI): void {
     const finalOutput = getFinalAssistantOutput(messages);
     if (!finalOutput || finalOutput.trim().length === 0) return;
 
+    // agent_end may fire more than once while Pi retries or compacts. A task
+    // result is terminal, so send it at most once per correlation.
+    if (autoReturnedCorrelations.has(correlationId)) return;
+
     // Auto-send result
     const msg: AgentMessage = {
       from: currentAgentName,
@@ -484,6 +497,10 @@ export default function (pi: ExtensionAPI): void {
     };
 
     deliverMessage(msg);
+    autoReturnedCorrelations.add(correlationId);
+    if (activeDelegatedTask?.correlationId === correlationId) {
+      activeDelegatedTask = null;
+    }
 
     // Auto-capture task result to project memory (pi-hermes-memory compatible)
     try {
@@ -542,6 +559,26 @@ export default function (pi: ExtensionAPI): void {
       ),
     }),
     async execute(_toolCallId, params) {
+      const isManualActiveTaskResult =
+        params.type === "result" &&
+        activeDelegatedTask !== null &&
+        params.to === activeDelegatedTask.from &&
+        (params.correlationId === undefined ||
+          params.correlationId === activeDelegatedTask.correlationId);
+      if (isManualActiveTaskResult) {
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                "ℹ️ Normal task completion is returned automatically by pi-agent-bus. " +
+                "This manual result was not sent because it would duplicate the automatic result.",
+            },
+          ],
+          details: { suppressed: "duplicate-normal-task-result" },
+        };
+      }
+
       if (isManualMode()) {
         return {
           content: [
