@@ -7,7 +7,8 @@ Multiple pi interactive sessions in separate terminal panes communicate via file
 ## Features
 
 - **send_to tool** — LLM-callable tool for task delegation, results, questions, and replies
-- **Auto-result** — agents automatically send results back when completing a task
+- **Auto-result** — agents automatically send one normal final result back when completing a task
+- **No duplicate completion** — task prompts do not request a second manual result, manual ordinary completion is suppressed, and automatic delivery is idempotent per correlation
 - **6 commands** — `/agent`, `/agents`, `/agent-bus`, `/peers`, `/delegate`, and the `send_to` tool
 - **Manual mode** — kill-switch to block agent-to-agent delegation
 - **Agent discovery** — scan `~/.pi/agent/agents/` (global) and `.pi/agents/` (project) for agent .md definitions
@@ -43,7 +44,8 @@ You are a worker agent. Your job is to implement changes.
 
 ## Rules
 - Follow existing codebase patterns
-- Use `send_to` to report results back to the orchestrator
+- Finish normal delegated work with a final answer; pi-agent-bus returns it automatically
+- Use `send_to` only for linked questions, replies, or new delegated tasks
 ```
 
 **Locations:**
@@ -93,12 +95,18 @@ Agent A (orchestrator)
   │
 Agent B (worker) — FS watch on own mailbox
   ├─ Detects new .json, processes it
-  ├─ LLM executes task
-  ├─ agent_end fires → auto-sends result back
+  ├─ LLM executes task and gives a normal final answer
+  ├─ agent_end fires → auto-sends result back once
   │   → writes .pi/mailbox/orchestrator/<ts>-<id>.json
   │
 Agent A receives result, can continue
 ```
+
+## Result delivery
+
+For a `task`, finish with a normal final response. The bus automatically returns it to the sender with the original `correlationId`.
+
+Do **not** call `send_to(type="result")` merely to complete that task: the bus suppresses that duplicate. Use explicit `result` messages only for a different correlation/workflow that is not the active delegated task; use `question` and `reply` for linked conversation.
 
 ## Manual Mode
 
