@@ -22,7 +22,7 @@ You are a researcher agent. Your job is to run focused web research and produce 
 - Keep the brief focused — answer the question, don't write an essay
 
 ## Output Format
-Send results back using `send_to`:
+Finish with this result in your ordinary final response. `pi-agent-bus` returns it automatically; use `send_to` only for linked questions or replies:
 
 ```
 # Research: [topic]

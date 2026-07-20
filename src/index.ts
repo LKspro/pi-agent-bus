@@ -21,6 +21,12 @@ import {
   getAgentNames,
   type AgentConfig,
 } from "./agents";
+import {
+  AutoReturnedCorrelations,
+  shouldSuppressManualTaskResult,
+  taskCompletionInstructions,
+  type ActiveDelegatedTask,
+} from "./result-delivery";
 
 // ---------------------------------------------------------------------------
 // State
@@ -30,8 +36,8 @@ let currentAgentName: string | null = null; // null = orchestrator
 let currentAgent: AgentConfig | null = null;
 let mailboxWatcher: fs.FSWatcher | null = null;
 let cwd: string = process.cwd();
-let activeDelegatedTask: Pick<AgentMessage, "from" | "correlationId"> | null = null;
-const autoReturnedCorrelations = new Set<string>();
+let activeDelegatedTask: ActiveDelegatedTask | null = null;
+const autoReturnedCorrelations = new AutoReturnedCorrelations();
 
 // ---------------------------------------------------------------------------
 // Message types
@@ -208,10 +214,10 @@ function buildPromptFromMessage(msg: AgentMessage): string {
         `${header}\n\n` +
         `**Task assigned to you:**\n\n${msg.body}\n\n` +
         `---\n` +
-        `Your ordinary final response is returned automatically to "${msg.from}" ` +
-        `with correlationId "${msg.correlationId}". Do not use \`send_to\` ` +
-        `with type "result" for normal completion; that would duplicate the automatic ` +
-        `result. Use \`send_to\` only for linked questions or replies.`
+        taskCompletionInstructions({
+          from: msg.from,
+          correlationId: msg.correlationId,
+        })
       );
     }
 
@@ -417,6 +423,8 @@ export default function (pi: ExtensionAPI): void {
   // ── Session start: detect identity, watch mailbox ──
   pi.on("session_start", async (_event, ctx) => {
     cwd = ctx.cwd || process.cwd();
+    activeDelegatedTask = null;
+    autoReturnedCorrelations.clear();
     detectIdentity(pi);
 
     // GC stale .processing locks from previous runs
@@ -480,7 +488,7 @@ export default function (pi: ExtensionAPI): void {
     };
 
     deliverMessage(msg);
-    autoReturnedCorrelations.add(correlationId);
+    autoReturnedCorrelations.record(correlationId);
     if (activeDelegatedTask?.correlationId === correlationId) {
       activeDelegatedTask = null;
     }
@@ -542,13 +550,7 @@ export default function (pi: ExtensionAPI): void {
       ),
     }),
     async execute(_toolCallId, params) {
-      const isManualActiveTaskResult =
-        params.type === "result" &&
-        activeDelegatedTask !== null &&
-        params.to === activeDelegatedTask.from &&
-        (params.correlationId === undefined ||
-          params.correlationId === activeDelegatedTask.correlationId);
-      if (isManualActiveTaskResult) {
+      if (shouldSuppressManualTaskResult(activeDelegatedTask, params)) {
         return {
           content: [
             {
@@ -737,7 +739,8 @@ export default function (pi: ExtensionAPI): void {
             "",
             "## Rules",
             "- Follow existing codebase patterns and conventions",
-            "- Use `send_to` to report results back to the orchestrator",
+            "- Finish normal delegated work with a final answer; pi-agent-bus returns it automatically",
+            "- Use `send_to` only for linked questions, replies, or new delegated tasks",
             "- Do not make unapproved architectural changes",
             "",
             "## Output Format",

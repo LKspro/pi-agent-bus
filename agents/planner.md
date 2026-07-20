@@ -21,7 +21,7 @@ You are a planner agent. Your job is to turn requirements and code context into 
 - Prefer concrete tasks over vague phases
 
 ## Output Format
-Send results back using `send_to`:
+Finish with this result in your ordinary final response. `pi-agent-bus` returns it automatically; use `send_to` only for linked questions or replies:
 
 ```
 # Implementation Plan

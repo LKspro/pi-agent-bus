@@ -4,6 +4,9 @@
   "description": "File-based inter-agent communication bus for pi coding agent. Multiple pi sessions communicate via filesystem mailboxes — the filesystem IS the network.",
   "type": "module",
   "main": "src/index.ts",
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.mjs"
+  },
   "files": [
     "src",
     "agents",
