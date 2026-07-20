@@ -21,6 +21,13 @@ import {
   getAgentNames,
   type AgentConfig,
 } from "./agents";
+import {
+  TerminalResultCorrelations,
+  shouldAcceptInboundMessage,
+  shouldSuppressManualTaskResult,
+  taskCompletionInstructions,
+  type ActiveDelegatedTask,
+} from "./result-delivery";
 
 // ---------------------------------------------------------------------------
 // State
@@ -30,6 +37,9 @@ let currentAgentName: string | null = null; // null = orchestrator
 let currentAgent: AgentConfig | null = null;
 let mailboxWatcher: fs.FSWatcher | null = null;
 let cwd: string = process.cwd();
+let activeDelegatedTask: ActiveDelegatedTask | null = null;
+const autoReturnedCorrelations = new TerminalResultCorrelations();
+const receivedResultCorrelations = new TerminalResultCorrelations();
 
 // ---------------------------------------------------------------------------
 // Message types
@@ -161,6 +171,19 @@ function processIncomingMessage(filePath: string, pi: ExtensionAPI): void {
     return;
   }
 
+  // A result is terminal for a correlation. Suppress a duplicated inbound
+  // result before it queues a second agent turn.
+  if (!shouldAcceptInboundMessage(msg.type, msg.correlationId, receivedResultCorrelations)) {
+    tryCleanup(processingPath);
+    return;
+  }
+
+  // Record the task before queuing its prompt so normal manual completion can
+  // be suppressed. The agent_end handler returns the final answer automatically.
+  if (msg.type === "task") {
+    activeDelegatedTask = { from: msg.from, correlationId: msg.correlationId };
+  }
+
   // Build prompt and queue for next turn (never interrupt)
   const promptText = buildPromptFromMessage(msg);
   pi.sendUserMessage(promptText, { deliverAs: "followUp" });
@@ -200,9 +223,10 @@ function buildPromptFromMessage(msg: AgentMessage): string {
         `${header}\n\n` +
         `**Task assigned to you:**\n\n${msg.body}\n\n` +
         `---\n` +
-        `When you complete this task, use the \`send_to\` tool to send ` +
-        `your results back to "${msg.from}" with type "result" and ` +
-        `correlationId "${msg.correlationId}".`
+        taskCompletionInstructions({
+          from: msg.from,
+          correlationId: msg.correlationId,
+        })
       );
     }
 
@@ -408,6 +432,9 @@ export default function (pi: ExtensionAPI): void {
   // ── Session start: detect identity, watch mailbox ──
   pi.on("session_start", async (_event, ctx) => {
     cwd = ctx.cwd || process.cwd();
+    activeDelegatedTask = null;
+    autoReturnedCorrelations.clear();
+    receivedResultCorrelations.clear();
     detectIdentity(pi);
 
     // GC stale .processing locks from previous runs
@@ -455,6 +482,10 @@ export default function (pi: ExtensionAPI): void {
     const finalOutput = getFinalAssistantOutput(messages);
     if (!finalOutput || finalOutput.trim().length === 0) return;
 
+    // agent_end may fire more than once while Pi retries or compacts. A task
+    // result is terminal, so send it at most once per correlation.
+    if (autoReturnedCorrelations.has(correlationId)) return;
+
     // Auto-send result
     const msg: AgentMessage = {
       from: currentAgentName,
@@ -467,6 +498,10 @@ export default function (pi: ExtensionAPI): void {
     };
 
     deliverMessage(msg);
+    autoReturnedCorrelations.record(correlationId);
+    if (activeDelegatedTask?.correlationId === correlationId) {
+      activeDelegatedTask = null;
+    }
 
     // Auto-capture task result to project memory (pi-hermes-memory compatible)
     try {
@@ -525,6 +560,20 @@ export default function (pi: ExtensionAPI): void {
       ),
     }),
     async execute(_toolCallId, params) {
+      if (shouldSuppressManualTaskResult(activeDelegatedTask, params)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                "ℹ️ Normal task completion is returned automatically by pi-agent-bus. " +
+                "This manual result was not sent because it would duplicate the automatic result.",
+            },
+          ],
+          details: { suppressed: "duplicate-normal-task-result" },
+        };
+      }
+
       if (isManualMode()) {
         return {
           content: [
@@ -700,7 +749,8 @@ export default function (pi: ExtensionAPI): void {
             "",
             "## Rules",
             "- Follow existing codebase patterns and conventions",
-            "- Use `send_to` to report results back to the orchestrator",
+            "- Finish normal delegated work with a final answer; pi-agent-bus returns it automatically",
+            "- Use `send_to` only for linked questions, replies, or new delegated tasks",
             "- Do not make unapproved architectural changes",
             "",
             "## Output Format",

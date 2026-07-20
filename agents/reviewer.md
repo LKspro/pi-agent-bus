@@ -30,7 +30,7 @@ You are a reviewer agent. Your job is to inspect code changes and report finding
 - Use `bash` for read-only inspection (git diff, test runs)
 
 ## Output Format
-Send results back using `send_to`:
+Finish with this result in your ordinary final response. `pi-agent-bus` returns it automatically; use `send_to` only for linked questions or replies:
 
 ```
 ## Review

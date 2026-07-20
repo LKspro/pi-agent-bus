@@ -24,7 +24,7 @@ You are a worker agent. Your job is to implement changes according to specificat
 - Use `bash` for inspection, validation, and running tests
 
 ## Output Format
-When done, send results back using `send_to`:
+When done, provide this result in your ordinary final response. `pi-agent-bus` returns it automatically; use `send_to` only for linked questions or replies:
 
 ```
 ## Changes Made
