@@ -22,6 +22,7 @@ import {
   type AgentConfig,
 } from "./agents";
 import {
+  containsToolCall,
   DelegatedTaskTracker,
   TerminalResultCorrelations,
   messageFilename,
@@ -431,6 +432,34 @@ function getFinalAssistantOutput(
   return "";
 }
 
+/**
+ * Return the current delegated task exactly once. This is called at the
+ * terminal text turn, before queued follow-ups can replace the visible final
+ * answer. agent_end retains a fallback call for older/runtime edge cases.
+ */
+function autoReturnDelegatedTask(finalOutput: string): ActiveDelegatedTask | null {
+  if (!currentAgentName || !finalOutput.trim()) return null;
+
+  const delegatedTask = resolveAutomaticResultTask(delegatedTaskTracker);
+  if (!delegatedTask) return null;
+  const { from, correlationId } = delegatedTask;
+  if (autoReturnedCorrelations.has(correlationId)) return null;
+
+  deliverMessage({
+    from: currentAgentName,
+    to: from,
+    type: "result",
+    correlationId,
+    body: finalOutput,
+    timestamp: new Date().toISOString(),
+    inReplyTo: correlationId,
+  });
+  autoReturnedCorrelations.record(correlationId);
+  recordDelivery(delegatedTask, "returned");
+  delegatedTaskTracker.complete(correlationId);
+  return delegatedTask;
+}
+
 // ---------------------------------------------------------------------------
 // Manual mode toggle — global kill-switch for agent-to-agent delegation
 // ---------------------------------------------------------------------------
@@ -595,37 +624,13 @@ export default function (pi: ExtensionAPI): void {
 
     const messages = event.messages as Array<Record<string, unknown>>;
 
-    // The active task is recorded when a task reaches this session. Linked
-    // replies may follow it, so the last user message is not a reliable
-    // completion owner. Manual mode blocks new sends, not the terminal result
-    // for a task that was already accepted.
-    const delegatedTask = resolveAutomaticResultTask(delegatedTaskTracker);
+    // Linked replies may already be queued by the time agent_end fires. The
+    // terminal turn normally returned the task above; this is a fallback for
+    // runtimes that do not expose a terminal text turn.
+    const finalOutput = getFinalAssistantOutput(messages);
+    const delegatedTask = autoReturnDelegatedTask(finalOutput);
     if (!delegatedTask) return;
     const { from, correlationId } = delegatedTask;
-
-    // Get the final assistant output
-    const finalOutput = getFinalAssistantOutput(messages);
-    if (!finalOutput || finalOutput.trim().length === 0) return;
-
-    // agent_end may fire more than once while Pi retries or compacts. A task
-    // result is terminal, so send it at most once per correlation.
-    if (autoReturnedCorrelations.has(correlationId)) return;
-
-    // Auto-send result
-    const msg: AgentMessage = {
-      from: currentAgentName,
-      to: from,
-      type: "result",
-      correlationId,
-      body: finalOutput,
-      timestamp: new Date().toISOString(),
-      inReplyTo: correlationId,
-    };
-
-    deliverMessage(msg);
-    autoReturnedCorrelations.record(correlationId);
-    recordDelivery(delegatedTask, "returned");
-    delegatedTaskTracker.complete(correlationId);
 
     // Auto-capture task result to project memory (pi-hermes-memory compatible)
     try {
@@ -648,10 +653,14 @@ export default function (pi: ExtensionAPI): void {
     }
   });
 
-  // ── Turn end: update widget ──
-  pi.on("turn_end", async (_event, ctx) => {
-    if (!currentAgentName) return;
+  // ── Turn end: return terminal task response before queued follow-ups ──
+  pi.on("turn_end", async (event, ctx) => {
+    const assistantMessage = event.message as Record<string, unknown>;
+    if (!containsToolCall(assistantMessage)) {
+      autoReturnDelegatedTask(extractTextContent(assistantMessage));
+    }
 
+    if (!currentAgentName) return;
     const pendingCount = getPendingCount();
     const lines = [
       `🤖 ${currentAgentName}`,

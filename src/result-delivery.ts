@@ -11,6 +11,21 @@ export interface SendToParameters {
   correlationId?: unknown;
 }
 
+/** A text-only assistant turn is terminal; tool-call turns may continue. */
+export function containsToolCall(message: Record<string, unknown>): boolean {
+  const content = message.content;
+  return (
+    Array.isArray(content) &&
+    content.some(
+      (part) =>
+        typeof part === "object" &&
+        part !== null &&
+        ((part as { type?: unknown }).type === "toolCall" ||
+          (part as { type?: unknown }).type === "tool_use"),
+    )
+  );
+}
+
 /**
  * Tracks accepted delegated tasks and binds automatic completion to the task
  * prompt that is actually beginning an agent run. This deliberately separates

@@ -5,6 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  containsToolCall,
   DelegatedTaskTracker,
   TerminalResultCorrelations,
   messageFilename,
@@ -85,6 +86,20 @@ test("queued tasks bind their own agent run instead of overwriting each other", 
   );
   assert.equal(tracker.complete(second.correlationId), true);
   assert.deepEqual(tracker.unresolvedTasks(), []);
+});
+
+test("terminal text turns return before queued follow-ups; tool turns do not", async () => {
+  assert.equal(containsToolCall({ content: [{ type: "text", text: "NO-GO" }] }), false);
+  assert.equal(containsToolCall({ content: [{ type: "toolCall", name: "read" }] }), true);
+
+  const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const extensionSource = await readFile(join(projectRoot, "src", "index.ts"), "utf8");
+  const turnEnd = extensionSource.slice(
+    extensionSource.indexOf('pi.on("turn_end"'),
+    extensionSource.indexOf('// ── send_to tool'),
+  );
+  assert.match(turnEnd, /!containsToolCall\(assistantMessage\)/);
+  assert.match(turnEnd, /autoReturnDelegatedTask\(extractTextContent\(assistantMessage\)\)/);
 });
 
 test("message filenames remain unique for repeated same-correlation sends", () => {
