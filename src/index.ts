@@ -22,7 +22,10 @@ import {
   type AgentConfig,
 } from "./agents";
 import {
+  DelegatedTaskTracker,
   TerminalResultCorrelations,
+  messageFilename,
+  resolveAutomaticResultTask,
   shouldAcceptInboundMessage,
   shouldSuppressManualTaskResult,
   taskCompletionInstructions,
@@ -36,10 +39,19 @@ import {
 let currentAgentName: string | null = null; // null = orchestrator
 let currentAgent: AgentConfig | null = null;
 let mailboxWatcher: fs.FSWatcher | null = null;
+let mailboxWatchRestartTimer: NodeJS.Timeout | null = null;
 let cwd: string = process.cwd();
-let activeDelegatedTask: ActiveDelegatedTask | null = null;
+let delegatedTaskTracker = new DelegatedTaskTracker();
 const autoReturnedCorrelations = new TerminalResultCorrelations();
 const receivedResultCorrelations = new TerminalResultCorrelations();
+
+type DeliveryStatus = "active" | "queued" | "returned";
+interface DeliveryRecord extends ActiveDelegatedTask {
+  status: DeliveryStatus;
+  acceptedAt: string;
+  updatedAt: string;
+}
+const deliveryRecords = new Map<string, DeliveryRecord>();
 
 // ---------------------------------------------------------------------------
 // Message types
@@ -68,9 +80,17 @@ function getAgentMailboxDir(name: string): string {
 }
 
 function activateIdentity(name: string, pi: ExtensionAPI): void {
+  stopMailboxWatch();
+  if (currentAgentName !== name) {
+    delegatedTaskTracker = new DelegatedTaskTracker();
+    deliveryRecords.clear();
+    autoReturnedCorrelations.clear();
+    receivedResultCorrelations.clear();
+  }
   currentAgentName = name;
   currentAgent = findAgent(cwd, name) ?? null; // agent config is optional
   ensureMailbox(name);
+  restoreReceivedResultCorrelations();
   startMailboxWatch(pi);
 }
 
@@ -102,25 +122,115 @@ function ensureMailbox(name: string): void {
   fs.mkdirSync(getAgentMailboxDir(name), { recursive: true });
 }
 
+const RECEIVED_RESULTS_FILE = ".received-terminal-results.json";
+const MAX_RECEIVED_RESULT_CORRELATIONS = 500;
+
+function receivedResultsPath(): string | null {
+  return currentAgentName
+    ? path.join(getAgentMailboxDir(currentAgentName), RECEIVED_RESULTS_FILE)
+    : null;
+}
+
+function restoreReceivedResultCorrelations(): void {
+  const filePath = receivedResultsPath();
+  if (!filePath) return;
+  try {
+    const values = JSON.parse(fs.readFileSync(filePath, "utf-8")) as unknown;
+    if (!Array.isArray(values)) return;
+    for (const value of values.slice(-MAX_RECEIVED_RESULT_CORRELATIONS)) {
+      if (typeof value === "string") receivedResultCorrelations.record(value);
+    }
+  } catch {
+    // No cache or malformed runtime state: continue with in-memory protection.
+  }
+}
+
+function persistReceivedResultCorrelations(): void {
+  const filePath = receivedResultsPath();
+  if (!filePath) return;
+  const values = receivedResultCorrelations.values().slice(-MAX_RECEIVED_RESULT_CORRELATIONS);
+  const temporary = `${filePath}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(values), "utf-8");
+    fs.renameSync(temporary, filePath);
+  } catch {
+    tryCleanup(temporary);
+  }
+}
+
+function recordDelivery(task: ActiveDelegatedTask, status: DeliveryStatus): void {
+  const now = new Date().toISOString();
+  const previous = deliveryRecords.get(task.correlationId);
+  deliveryRecords.set(task.correlationId, {
+    ...task,
+    status,
+    acceptedAt: previous?.acceptedAt ?? now,
+    updatedAt: now,
+  });
+}
+
+function deliveryStatusLines(): string[] {
+  const records = [...deliveryRecords.values()]
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .slice(0, 20);
+  if (records.length === 0) return ["  No delegated task delivery has been observed in this session."];
+  return records.map((record) =>
+    `  ${record.status.padEnd(8)} ${record.correlationId} ← ${record.from} (${record.updatedAt})`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Mailbox watching & message processing
 // ---------------------------------------------------------------------------
 
+function stopMailboxWatch(): void {
+  if (mailboxWatchRestartTimer) {
+    clearTimeout(mailboxWatchRestartTimer);
+    mailboxWatchRestartTimer = null;
+  }
+  if (mailboxWatcher) {
+    mailboxWatcher.close();
+    mailboxWatcher = null;
+  }
+}
+
+function scheduleMailboxWatchRestart(pi: ExtensionAPI): void {
+  if (mailboxWatchRestartTimer || !currentAgentName) return;
+  mailboxWatchRestartTimer = setTimeout(() => {
+    mailboxWatchRestartTimer = null;
+    if (!currentAgentName) return;
+    ensureMailbox(currentAgentName);
+    startMailboxWatch(pi);
+  }, 250);
+}
+
 function startMailboxWatch(pi: ExtensionAPI): void {
   if (!currentAgentName) return;
+  stopMailboxWatch();
 
   const dir = getAgentMailboxDir(currentAgentName);
 
-  // Process any backlog (messages from when we were offline)
-  processBacklog(dir, pi);
+  // Watch before scanning the backlog: scanning first leaves a delivery-loss
+  // window where a message arrives after readdir but before fs.watch binds.
+  // The rename lock makes the watcher/backlog overlap safe.
+  try {
+    mailboxWatcher = fs.watch(dir, (eventType, filename) => {
+      if (eventType !== "rename" || !filename || !filename.endsWith(".json")) return;
+      const filePath = path.join(dir, filename);
+      // Delay to ensure file is fully written
+      setTimeout(() => processIncomingMessage(filePath, pi), 150);
+    });
+    mailboxWatcher.on("error", () => {
+      stopMailboxWatch();
+      scheduleMailboxWatchRestart(pi);
+    });
+  } catch {
+    scheduleMailboxWatchRestart(pi);
+  }
 
-  // Watch for new files
-  mailboxWatcher = fs.watch(dir, (eventType, filename) => {
-    if (eventType !== "rename" || !filename || !filename.endsWith(".json")) return;
-    const filePath = path.join(dir, filename);
-    // Delay to ensure file is fully written
-    setTimeout(() => processIncomingMessage(filePath, pi), 150);
-  });
+  // Process messages that arrived while this agent was offline. If a message
+  // also triggered the watcher, the rename-to-processing lock admits it once.
+  processBacklog(dir, pi);
 }
 
 function processBacklog(dir: string, pi: ExtensionAPI): void {
@@ -177,11 +287,18 @@ function processIncomingMessage(filePath: string, pi: ExtensionAPI): void {
     tryCleanup(processingPath);
     return;
   }
+  if (msg.type === "result") persistReceivedResultCorrelations();
 
-  // Record the task before queuing its prompt so normal manual completion can
-  // be suppressed. The agent_end handler returns the final answer automatically.
+  // A worker can receive a backlog or concurrent delegations. Keep each
+  // task unresolved until Pi actually begins its matching prompt; linked
+  // replies cannot replace that completion destination.
   if (msg.type === "task") {
-    activeDelegatedTask = { from: msg.from, correlationId: msg.correlationId };
+    const task = { from: msg.from, correlationId: msg.correlationId };
+    if (!delegatedTaskTracker.enqueue(task)) {
+      tryCleanup(processingPath);
+      return;
+    }
+    recordDelivery(task, "queued");
   }
 
   // Build prompt and queue for next turn (never interrupt)
@@ -268,9 +385,11 @@ function deliverMessage(msg: AgentMessage): void {
   const dir = getAgentMailboxDir(msg.to);
   fs.mkdirSync(dir, { recursive: true });
 
-  const ts = Date.now();
-  const shortId = msg.correlationId.replace(/-/g, "").slice(0, 8);
-  const filename = `${ts}-${shortId}.json`;
+  const filename = messageFilename(
+    Date.now(),
+    msg.correlationId,
+    crypto.randomUUID().replace(/-/g, "").slice(0, 12),
+  );
   const filePath = path.join(dir, filename);
 
   // Atomic write: temp file → rename
@@ -446,10 +565,17 @@ export default function (pi: ExtensionAPI): void {
     };
   });
 
+  // ── Agent start: bind automatic result delivery to this actual task run ──
+  pi.on("before_agent_start", async (event) => {
+    const task = delegatedTaskTracker.beginPrompt(event.prompt);
+    if (task) recordDelivery(task, "active");
+  });
+
   // ── Session start: detect identity, watch mailbox ──
   pi.on("session_start", async (_event, ctx) => {
     cwd = ctx.cwd || process.cwd();
-    activeDelegatedTask = null;
+    delegatedTaskTracker = new DelegatedTaskTracker();
+    deliveryRecords.clear();
     autoReturnedCorrelations.clear();
     receivedResultCorrelations.clear();
     detectIdentity(pi);
@@ -460,40 +586,22 @@ export default function (pi: ExtensionAPI): void {
 
   // ── Session shutdown: cleanup ──
   pi.on("session_shutdown", async () => {
-    if (mailboxWatcher) {
-      mailboxWatcher.close();
-      mailboxWatcher = null;
-    }
+    stopMailboxWatch();
   });
 
   // ── Agent end: auto-send results ──
   pi.on("agent_end", async (event) => {
     if (!currentAgentName) return;
-    if (isManualMode()) return; // manual mode blocks auto-send
 
     const messages = event.messages as Array<Record<string, unknown>>;
 
-    // Find the last user message
-    let lastUserMsg: Record<string, unknown> | null = null;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === "user") {
-        lastUserMsg = messages[i];
-        break;
-      }
-    }
-    if (!lastUserMsg) return;
-
-    // Check if it was a task from another agent
-    const text = extractTextContent(lastUserMsg);
-    const taskMatch = text.match(/^--- Message from "([^"]+)" \(type: task\) ---/);
-    if (!taskMatch) return;
-
-    const from = taskMatch[1];
-
-    // Extract correlationId
-    const corrMatch = text.match(/correlationId "([^"]+)"/);
-    if (!corrMatch) return;
-    const correlationId = corrMatch[1];
+    // The active task is recorded when a task reaches this session. Linked
+    // replies may follow it, so the last user message is not a reliable
+    // completion owner. Manual mode blocks new sends, not the terminal result
+    // for a task that was already accepted.
+    const delegatedTask = resolveAutomaticResultTask(delegatedTaskTracker);
+    if (!delegatedTask) return;
+    const { from, correlationId } = delegatedTask;
 
     // Get the final assistant output
     const finalOutput = getFinalAssistantOutput(messages);
@@ -516,14 +624,18 @@ export default function (pi: ExtensionAPI): void {
 
     deliverMessage(msg);
     autoReturnedCorrelations.record(correlationId);
-    if (activeDelegatedTask?.correlationId === correlationId) {
-      activeDelegatedTask = null;
-    }
+    recordDelivery(delegatedTask, "returned");
+    delegatedTaskTracker.complete(correlationId);
 
     // Auto-capture task result to project memory (pi-hermes-memory compatible)
     try {
-      const taskText = extractTextContent(lastUserMsg);
-      const taskBodyMatch = taskText.match(/\*\*Task assigned to you:\*\*\n\n([\s\S]*?)\n\n---/);
+      const taskText = messages
+        .slice()
+        .reverse()
+        .filter((message) => message.role === "user")
+        .map(extractTextContent)
+        .find((text) => text.startsWith(`--- Message from "${from}" (type: task) ---`) && text.includes(`correlationId "${correlationId}"`));
+      const taskBodyMatch = taskText?.match(/\*\*Task assigned to you:\*\*\n\n([\s\S]*?)\n\n---/);
       if (taskBodyMatch) {
         const taskSnippet = taskBodyMatch[1].trim().slice(0, 200);
         const resultSnippet = finalOutput.trim().slice(0, 200);
@@ -577,7 +689,7 @@ export default function (pi: ExtensionAPI): void {
       ),
     }),
     async execute(_toolCallId, params) {
-      if (shouldSuppressManualTaskResult(activeDelegatedTask, params)) {
+      if (shouldSuppressManualTaskResult(delegatedTaskTracker.runningTask(), params)) {
         return {
           content: [
             {
@@ -736,7 +848,7 @@ export default function (pi: ExtensionAPI): void {
   // ── /agent-bus command — project init, manual toggle ──
   pi.registerCommand("agent-bus", {
     description:
-      "Manage agent-bus: init a project or toggle manual mode. Usage: /agent-bus [init|manual]",
+      "Manage agent-bus: init, inspect delivery status, or toggle manual mode. Usage: /agent-bus [init|status|manual]",
     handler: async (args, ctx) => {
       if (!args || args === "init") {
         // Create project structure
@@ -802,6 +914,14 @@ export default function (pi: ExtensionAPI): void {
         return;
       }
 
+      if (args === "status") {
+        ctx.ui.notify(
+          ["Agent-bus delivery status:", ...deliveryStatusLines()].join("\n"),
+          "info",
+        );
+        return;
+      }
+
       if (args === "manual") {
         const flagFile = path.join(cwd, ".pi", "agent-bus-manual");
         if (fs.existsSync(flagFile)) {
@@ -820,7 +940,7 @@ export default function (pi: ExtensionAPI): void {
         return;
       }
 
-      ctx.ui.notify("Usage: /agent-bus [init|manual]", "warning");
+      ctx.ui.notify("Usage: /agent-bus [init|status|manual]", "warning");
     },
   });
 
